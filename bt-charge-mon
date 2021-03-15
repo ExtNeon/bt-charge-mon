@@ -1,0 +1,109 @@
+#!/bin/bash
+id=$1
+yad_installed=0
+bhbl_installed=0
+function check_charge {
+    prc_raw=`bluetooth-headset-battery-level $id | head -n 1`
+    prc=`echo $prc_raw | cut -d ' ' -f6 | tr -d '%'`
+    e=`echo "$prc_raw" | cut -d ' ' -f1`
+}
+trap 'echo -e "\nMonitoring cancelled"; killall yad -q; exit 2' INT TERM
+if command -v bluetooth-headset-battery-level >/dev/null 2>&1 ; then
+    bhbl_installed=1
+else
+    echo "Dependency broken: bluetooth-headset-battery-level-git is not installed."
+fi
+
+if command -v yad >/dev/null 2>&1 ; then
+    yad_installed=1
+else
+    echo "Dependency broken: YAD is not installed."
+fi
+
+if [[ -z $1 || $1 = '--help' ]]; then
+    echo "Bluetooth charge monitor icon daemon.";
+    echo "Uses YAD to show icon and bluetooth-headset-battery-level to get info from bluetooth device.";
+    echo "usage: bt-charge-mon [device id]; Like 'bt-charge-mon 1C:91:9D:D7:B2:85'";
+    echo "Shows an icon with level of charge when can connect to bluetooth device, and hides it when connection breaks.";
+    echo "Uses tiny amount of RAM and CPU, so you can leave it working for you ;]"
+    echo "Add that command to autorun if you want automatic monitoring start.";
+    exit
+fi
+
+if [[ yad_installed -eq 0 && bhbl_installed -eq 0 ]]; then
+    echo "I can't work without YAD or bluetooth-headset-battery-level. Exiting...";
+    exit;
+fi
+let err_conn_in_a_row=0
+last_success=0
+first_run=1
+last_prc=0
+DISCONNECT_THRESHOLD=1
+ERROR_RETRY_TIMEOUT=60
+UPDATE_CHARGE_LEVEL_SPAN=120
+headphones_connected=0
+sleep_time=0
+while true; do
+    current_datetime=`date`
+    echo -e "Retreiving info...                                     \r\c"
+    alarm_text="bt_bat_source.png"
+    check_charge
+    if [[ $e != "Battery" ]]; then
+        err_conn_in_a_row=`echo "$err_conn_in_a_row + 1" | bc`
+         last_success=0
+         sleep_time=$ERROR_RETRY_TIMEOUT
+         echo "$current_datetime | Error while Retreiving info ($err_conn_in_a_row/$DISCONNECT_THRESHOLD): $prc_raw"
+         echo "Another attempt will be performed after $ERROR_RETRY_TIMEOUT seconds"
+    else
+        if [[ $err_conn_in_a_row > $DISCONNECT_THRESHOLD || $first_run > 0 ]]; then
+            headphones_connected=1
+        fi
+        err_conn_in_a_row=0
+        last_success=1
+        echo "$current_datetime | OK; Current charge: $prc%"
+    fi
+    if [[ $err_conn_in_a_row -gt $DISCONNECT_THRESHOLD ]]; then
+        killall yad -wq
+        echo 'Device is not connected'
+    fi
+    if [[ $last_success -gt 0 ]]; then
+        if [[ $prc -lt 40 ]]; then
+            if [[ $prc -lt 20 ]]; then
+                color=#CC0000
+                alarm_text="bt_bat_source_alarm.png"
+            else
+                color=#ff5a00
+            fi
+        else
+            if [[ $prc -lt 60 ]]; then
+                color=#AAAA00
+            else
+                if [[ $prc -gt 70 ]]; then
+                    color=#00FF00
+                else
+                    color=#00BB00
+                fi
+            fi
+        fi
+        if [[ $last_prc != $prc ]]; then
+            first_run=0
+            last_prc=$prc
+            height=`echo "$prc / 2.702702702702703" | bc`
+            top=`echo "scale=1;44 - $height" | bc`
+            killall yad -wq
+            rm -f /tmp/bt_bat_current.png
+            convert $alarm_text -fill "$color" -draw "rectangle 28,44 44,$top " /tmp/bt_bat_current.png && yad --notification --command "notify-send -a 'Bluetooth headphones battery monitor' -i '/tmp/bt_bat_current.png' -t 3000 'Current device charge: $prc%'" --image /tmp/bt_bat_current.png&
+            if [[ $headphones_connected > 0 ]]; then
+                notify-send -a 'Bluetooth headphones battery monitor' -i "/tmp/bt_bat_current.png" -t 3000 "Battery monitor is running: device connected. Charge: $prc%"
+                headphones_connected=0
+            fi
+            echo "Icon updated, time interval is $sleep_time"
+        fi
+        sleep_time=`echo "$sleep_time + $UPDATE_CHARGE_LEVEL_SPAN" | bc`
+    fi
+    while [[ $sleep_time -gt 0 ]]; do
+        sleep 1
+        sleep_time=`echo "$sleep_time - 1" | bc`
+        echo -e "Time left before next request: $sleep_time \r\c"
+    done
+done
